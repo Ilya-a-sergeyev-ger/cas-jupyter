@@ -5,11 +5,12 @@
 Run: PYTHONPATH=.:../cas-client pytest tests/
 """
 
+import inspect
+
 import pytest
 
 from krauncher_magic.codegen import build_cell_function
 from krauncher_magic.transfer import (
-    PICKLE_TAG,
     TransferError,
     decode_outputs,
     encode_inputs,
@@ -21,12 +22,12 @@ INS = ["epochs", "name", "data", "ratio"]
 OUTS = ["total", "label"]
 
 
-def test_scalars_pass_raw_objects_pickle():
-    kwargs = encode_inputs(INS, NS)
-    # JSON scalars stay raw — keeps numeric args visible to the analyzer.
-    assert kwargs["epochs"] == 3
-    assert kwargs["name"] == "bert"
-    assert isinstance(kwargs["data"], str) and kwargs["data"].startswith(PICKLE_TAG)
+def test_json_values_pass_raw():
+    # JSON-safe values (scalars and lists) pass through unchanged so the
+    # analyzer sees them and the clean function runs on them directly.
+    assert encode_inputs(INS, NS) == {
+        "epochs": 3, "name": "bert", "data": [1, 2, 3], "ratio": 0.5,
+    }
 
 
 def test_roundtrip_through_generated_function():
@@ -48,6 +49,14 @@ def test_serializer_worker_simulation():
     assert decode_outputs(ns[entry](**kwargs), OUTS) == {"total": 18, "label": "BERT"}
 
 
+def test_generated_source_is_plain_user_code():
+    """What the analyzer classifies and the worker runs must be the cell body,
+    with no transport scaffolding leaking in."""
+    src = inspect.getsource(build_cell_function(CELL, INS, OUTS))
+    for token in ("pickle", "base64", "_kr_dec", "_kr_enc", "b64"):
+        assert token not in src
+
+
 def test_toplevel_global_rejected():
     with pytest.raises(TransferError):
         build_cell_function("global x\nx = 1", [], ["x"])
@@ -57,7 +66,7 @@ def test_nested_global_allowed():
     build_cell_function("def f():\n    global q\n    q = 1\nf()", [], [])
 
 
-def test_unpicklable_input_rejected():
+def test_non_json_input_rejected():
     with pytest.raises(TransferError):
         encode_inputs(["f"], {"f": lambda: 1})
 

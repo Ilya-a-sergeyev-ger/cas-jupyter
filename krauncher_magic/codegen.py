@@ -1,16 +1,16 @@
 # Copyright (c) 2026 Ilya Sergeev. Licensed under the MIT License.
 
-"""Synthesize the remote wrapper function from a notebook cell.
+"""Synthesize the remote function from a notebook cell.
 
 The cell body becomes the body of a generated function whose parameters are
-the --in names and whose return value is the ``{name: tagged-value}`` outputs
-dict (see transfer.py). The generated source is registered in ``linecache`` so
-``inspect.getsource`` — which krauncher's serializer relies on — works on the
-exec'd function object.
+the --in names and whose return value is the ``{name: value}`` outputs dict.
+The generated source is registered in ``linecache`` so ``inspect.getsource`` —
+which krauncher's serializer relies on — works on the exec'd function object.
 
-Mirror contract: the decode/encode prologue+epilogue emitted here must match
-transfer.PICKLE_TAG and the tagged-string format exactly — the wrapper runs on
-the worker where krauncher_magic is not installed, so the logic is inlined.
+The generated function is exactly what the analyzer classifies and the worker
+executes: plain user code, no transport scaffolding. --in/--out therefore carry
+JSON-safe values only (enforced in transfer.py); large/complex data goes through
+a data source / volume, not through the function body.
 """
 
 from __future__ import annotations
@@ -21,28 +21,13 @@ import textwrap
 from itertools import count
 from typing import Callable
 
-from .transfer import PICKLE_TAG, TransferError
+from .transfer import TransferError
 
 _ENTRY = "_kr_cell"
 _seq = count(1)
 
-# JSON-safe scalars mirror (worker side has no krauncher_magic import).
 _PROLOGUE = f"""\
 def {_ENTRY}({{params}}):
-    import base64 as _kr_b64, pickle as _kr_pkl
-    _kr_TAG = {PICKLE_TAG!r}
-    def _kr_dec(v):
-        if isinstance(v, str) and v.startswith(_kr_TAG):
-            return _kr_pkl.loads(_kr_b64.b64decode(v[len(_kr_TAG):]))
-        return v
-    def _kr_enc(v):
-        if isinstance(v, (int, float, bool, type(None))):
-            return v
-        if isinstance(v, str) and not v.startswith(_kr_TAG):
-            return v
-        return _kr_TAG + _kr_b64.b64encode(
-            _kr_pkl.dumps(v, protocol=_kr_pkl.HIGHEST_PROTOCOL)).decode("ascii")
-{{decodes}}
 """
 
 _EPILOGUE = """\
@@ -73,12 +58,11 @@ def build_cell_function(cell: str, inputs: list[str], outputs: list[str]) -> Cal
     _reject_unsupported(cell)
 
     params = ", ".join(f"{n}=None" for n in inputs)
-    decodes = "\n".join(f"    {n} = _kr_dec({n})" for n in inputs) or "    pass"
     body = textwrap.indent(cell.rstrip() + "\n", "    ")
-    returns = ", ".join(f"{n!r}: _kr_enc({n})" for n in outputs)
+    returns = ", ".join(f"{n!r}: {n}" for n in outputs)
 
     source = (
-        _PROLOGUE.format(params=params, decodes=decodes)
+        _PROLOGUE.format(params=params)
         + body
         + _EPILOGUE.format(returns=returns)
     )
