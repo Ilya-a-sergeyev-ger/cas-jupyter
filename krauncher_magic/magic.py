@@ -16,19 +16,49 @@ def _run_sync(coro) -> Any:
     """Run a coroutine to completion from the (sync) magic context.
 
     ipykernel's own event loop is busy running the cell, so the task client
-    gets a private loop in a worker thread.
+    gets a private loop in a worker thread. Jupyter's Interrupt (■) raises
+    KeyboardInterrupt in the main thread only — propagate it as cancellation
+    of the coroutine so the client's normal Ctrl-C path runs (cancel-on-
+    abandon: broker DELETE + relay CancelTask stop the task and release the
+    hold).
     """
     box: dict[str, Any] = {}
+    done = threading.Event()
 
     def _target() -> None:
+        loop = asyncio.new_event_loop()
+        task = loop.create_task(coro)
+
+        def _cancel() -> None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass  # loop already closed — nothing left to cancel
+
+        box["cancel"] = _cancel
         try:
-            box["value"] = asyncio.run(coro)
+            box["value"] = loop.run_until_complete(task)
         except BaseException as exc:  # noqa: BLE001 — surfaced below
             box["error"] = exc
+        finally:
+            loop.close()
+            done.set()
 
     thread = threading.Thread(target=_target, name="krauncher-cell", daemon=True)
     thread.start()
-    thread.join()
+    try:
+        # Completion is signalled via an Event, NOT Thread.join():
+        # a KeyboardInterrupt landing inside join(timeout) corrupts the
+        # Thread state (is_alive goes False while the thread still runs).
+        # Bounded waits keep interrupt delivery prompt on all platforms.
+        while not done.wait(0.2):
+            pass
+    except KeyboardInterrupt:
+        cancel = box.get("cancel")
+        if cancel:
+            cancel()
+        done.wait(timeout=30)  # let cancel-on-abandon inside wait() finish
+        raise
     if "error" in box:
         raise box["error"]
     return box["value"]
