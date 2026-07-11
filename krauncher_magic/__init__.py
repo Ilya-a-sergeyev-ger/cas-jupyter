@@ -24,7 +24,6 @@ __version__ = "0.1.0"
 
 
 def load_ipython_extension(ipython):
-    # Imported lazily: transfer/codegen are usable (and testable) without IPython.
     from .magic import KrauncherMagics
 
     ipython.register_magics(KrauncherMagics)

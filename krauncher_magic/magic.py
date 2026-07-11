@@ -11,9 +11,6 @@ from typing import Any
 from IPython.core import magic_arguments
 from IPython.core.magic import Magics, cell_magic, magics_class
 
-from .codegen import build_cell_function
-from .transfer import TransferError, decode_outputs, encode_inputs
-
 
 def _run_sync(coro) -> Any:
     """Run a coroutine to completion from the (sync) magic context.
@@ -71,28 +68,30 @@ class KrauncherMagics(Magics):
         outputs = _split_names(args.outputs)
         pip = _split_names(args.pip)
 
-        try:
-            call_kwargs = encode_inputs(inputs, self.shell.user_ns)
-            fn = build_cell_function(cell, inputs, outputs)
-        except TransferError as exc:
-            print(f"krauncher: {exc}")
+        missing = [n for n in inputs if n not in self.shell.user_ns]
+        if missing:
+            print(f"krauncher: --in {', '.join(missing)}: not defined in the notebook")
             return
+        call_values = {n: self.shell.user_ns[n] for n in inputs}
 
         # Fresh client per cell: each execution runs on its own private event
         # loop (see _run_sync), and the cell code changes between runs anyway,
         # so there is no cross-cell client state worth keeping.
         from krauncher import KrauncherClient, KrauncherError
+        from krauncher.values import decode_outputs
 
         client = KrauncherClient(estimate_only=args.estimate or None)
-        task_fn = client.task(
-            vram_gb=args.vram,
-            gpu_name=args.gpu_name,
-            pip=pip or None,
-            timeout=args.timeout,
-        )(fn)
 
         async def _submit():
-            handle = await task_fn(**call_kwargs)
+            handle = await client.run_code(
+                cell,
+                inputs=call_values,
+                outputs=outputs,
+                vram_gb=args.vram,
+                gpu_name=args.gpu_name,
+                pip=pip or None,
+                timeout=args.timeout,
+            )
             quote = getattr(handle, "classification", None)
             if quote is not None:
                 self._print_quote(quote)
@@ -117,7 +116,7 @@ class KrauncherMagics(Magics):
 
         try:
             values = decode_outputs(result.output, outputs)
-        except TransferError as exc:
+        except KrauncherError as exc:
             print(f"krauncher: {exc}")
             return
         self.shell.user_ns.update(values)
