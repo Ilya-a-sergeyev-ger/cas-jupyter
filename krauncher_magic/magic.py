@@ -170,6 +170,9 @@ class KrauncherMagics(Magics):
                               help="execution timeout in seconds (default 600)")
     @magic_arguments.argument("--gpu-name", default=None,
                               help="pin a GPU model (substring, e.g. 'A4000')")
+    @magic_arguments.argument("--dataset-size", dest="dataset_size", type=float, default=None,
+                              help="declared input data size in MB for the quote "
+                                   "(e.g. private S3 objects the client cannot size)")
     @magic_arguments.argument("--estimate", action="store_true",
                               help="classify and quote only — do not run")
     @cell_magic
@@ -213,7 +216,21 @@ class KrauncherMagics(Magics):
         for d in hf_dynamic:
             print(f"krauncher: {d}: dynamic HF reference — downloads in-code, "
                   f"IO will be billed as compute")
-        data_urls = [u + CACHE_FRAGMENT for u in hf_urls] or None
+
+        # S3 references: exact-object literals are pre-fetched by the bridge
+        # and rewritten to the local mount path (no cache layer to rely on);
+        # credentials come from the user defaults at dispatch.
+        from krauncher.s3 import detect_s3_refs, rewrite_s3_refs, s3_local_mapping
+        s3_urls, s3_notes = detect_s3_refs(cell)
+        s3_map, s3_map_notes = s3_local_mapping(s3_urls) if s3_urls else ({}, [])
+        for n in (*s3_notes, *s3_map_notes):
+            print(f"krauncher: {n}")
+        if s3_map:
+            cell = rewrite_s3_refs(cell, s3_map)
+            for u, p in s3_map.items():
+                print(f"krauncher: s3 pre-fetch: {u} → {p}")
+
+        data_urls = [u + CACHE_FRAGMENT for u in hf_urls] + list(s3_map) or None
 
         # Fresh client per cell: each execution runs on its own private event
         # loop (see _run_sync), and the cell code changes between runs anyway,
@@ -225,11 +242,14 @@ class KrauncherMagics(Magics):
         client = KrauncherClient()
 
         async def _submit():
-            # Size the HF pre-fetch first: it feeds cu_io / disk in the quote.
-            dataset_mb = None
+            # Size the pre-fetch first: it feeds cu_io / disk in the quote.
+            # Explicit --dataset-size wins (private S3 objects cannot be
+            # sized client-side); otherwise the HF Hub API sizes hf refs.
+            dataset_mb = args.dataset_size
             if hf_urls:
-                from krauncher.hf import hf_size_mb
-                dataset_mb = await hf_size_mb(hf_urls)
+                if dataset_mb is None:
+                    from krauncher.hf import hf_size_mb
+                    dataset_mb = await hf_size_mb(hf_urls)
                 size_str = f" ({dataset_mb:.0f} MB)" if dataset_mb else ""
                 print("krauncher: hf pre-fetch: "
                       + ", ".join(u.removeprefix("hf://") for u in hf_urls)
