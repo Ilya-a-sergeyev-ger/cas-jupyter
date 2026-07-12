@@ -111,3 +111,28 @@ def test_auto_inputs_non_json_safe_noted():
 def test_auto_inputs_author_is_not_a_secret():
     names, notes = _auto_inputs(["author"], {"author": "ilya"})
     assert names == ["author"] and notes == []
+
+
+# ---------------------------------------------------------------------------
+# session affinity (_session_group_id)
+# ---------------------------------------------------------------------------
+
+from krauncher_magic import magic as magic_mod
+from krauncher_magic.magic import _session_group_id
+
+
+def test_session_group_id_stable_within_session():
+    assert _session_group_id(6) == _session_group_id(6)
+    assert magic_mod._SESSION_ID in _session_group_id(6)
+
+
+def test_session_group_id_varies_by_vram_class():
+    assert _session_group_id(6) != _session_group_id(30)
+    assert _session_group_id(30).endswith("-v30")
+
+
+def test_session_group_id_gpu_pin_in_key():
+    plain = _session_group_id(24)
+    pinned = _session_group_id(24, "RTX 4090")
+    assert plain != pinned
+    assert pinned.endswith("-rtx4090")

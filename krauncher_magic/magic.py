@@ -9,6 +9,7 @@ import inspect
 import json
 import re
 import threading
+import uuid
 from typing import Any
 
 from IPython.core import magic_arguments
@@ -26,6 +27,24 @@ _SECRET_VALUE_RE = re.compile(
     r"|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.)"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY"
 )
+
+
+# Session affinity: one id per kernel process — Restart the kernel starts a
+# new session (and its in-flight sweep cancelled the old session's tasks).
+_SESSION_ID = uuid.uuid4().hex[:8]
+
+
+def _session_group_id(min_vram_gb: int, gpu_name: str | None = None) -> str:
+    """Affinity key for a cell: session + requirement class.
+
+    Tier-1 group affinity pins to the group's worker WITHOUT re-checking
+    requirements, so the key must never mix VRAM classes / GPU pins — cells
+    with equal requirements share a warm worker, heavier ones re-route.
+    """
+    gid = f"nb-{_SESSION_ID}-v{min_vram_gb}"
+    if gpu_name:
+        gid += "-" + re.sub(r"[^a-z0-9]+", "", gpu_name.lower())
+    return gid
 
 
 def _auto_inputs(free: list[str], user_ns: dict) -> tuple[list[str], list[str]]:
@@ -192,9 +211,23 @@ class KrauncherMagics(Magics):
         from krauncher import KrauncherClient, KrauncherError
         from krauncher.values import decode_outputs
 
-        client = KrauncherClient(estimate_only=args.estimate or None)
+        # --estimate stops after the analysis phase — no estimate_only stubs.
+        client = KrauncherClient()
 
         async def _submit():
+            # Phase 1 — analysis request: quote before anything is submitted.
+            quote = await client.estimate_code(
+                cell,
+                inputs=call_values,
+                outputs=outputs,
+                lenient_outputs=auto_out,
+                vram_gb=args.vram,
+            )
+            self._print_quote(quote)
+            if args.estimate:
+                return None
+            # Phase 2 — execution request: precomputed classification (no
+            # re-analysis) + session affinity keyed by the requirement class.
             handle = await client.run_code(
                 cell,
                 inputs=call_values,
@@ -202,7 +235,8 @@ class KrauncherMagics(Magics):
                 # Auto-detected outputs may be unset or non-JSON-safe — drop
                 # them remotely instead of failing the task.
                 lenient_outputs=auto_out,
-                vram_gb=args.vram,
+                classification=quote,
+                group_id=_session_group_id(quote.min_vram_gb, args.gpu_name),
                 gpu_name=args.gpu_name,
                 pip=pip or None,
                 timeout=args.timeout,
@@ -210,11 +244,6 @@ class KrauncherMagics(Magics):
                 # cell output as it streams from the relay.
                 stream_stderr=True,
             )
-            quote = getattr(handle, "classification", None)
-            if quote is not None:
-                self._print_quote(quote)
-            if args.estimate:
-                return None
             return await handle
 
         try:
