@@ -121,6 +121,9 @@ class KrauncherMagics(Magics):
                 gpu_name=args.gpu_name,
                 pip=pip or None,
                 timeout=args.timeout,
+                # Live feedback: wait() mirrors remote stdout/stderr into the
+                # cell output as it streams from the relay.
+                stream_stderr=True,
             )
             quote = getattr(handle, "classification", None)
             if quote is not None:
@@ -137,8 +140,7 @@ class KrauncherMagics(Magics):
         if args.estimate or result is None:
             return
 
-        if result.stdout:
-            print(result.stdout, end="")
+        # Remote stdout was already mirrored live during wait() — no final echo.
         if result.status != "completed":
             print(f"krauncher: task {result.status}"
                   + (f"\n{result.traceback}" if result.traceback else ""))
