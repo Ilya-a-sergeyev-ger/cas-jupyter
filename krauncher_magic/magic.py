@@ -33,6 +33,64 @@ _SECRET_VALUE_RE = re.compile(
 # new session (and its in-flight sweep cancelled the old session's tasks).
 _SESSION_ID = uuid.uuid4().hex[:8]
 
+# Persistent background loop escorting --async tasks. E2E payload delivery
+# and result collection live inside TaskHandle.wait(), so someone must keep
+# awaiting the task after the submitting cell returns.
+_ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _escort_loop() -> asyncio.AbstractEventLoop:
+    global _ASYNC_LOOP
+    if _ASYNC_LOOP is None or _ASYNC_LOOP.is_closed():
+        loop = asyncio.new_event_loop()
+        threading.Thread(
+            target=loop.run_forever, name="krauncher-escort", daemon=True,
+        ).start()
+        _ASYNC_LOOP = loop
+    return _ASYNC_LOOP
+
+
+class AsyncTask:
+    """Handle injected by ``%%krauncher --async [NAME]`` for later cells.
+
+    ``task.done()`` polls; ``task.result()`` blocks, injects the outputs
+    into the notebook namespace and returns them; ``await task`` does the
+    same on the kernel loop. Failures raise with the remote status/traceback.
+    """
+
+    def __init__(self, future, user_ns: dict, box: dict):
+        self._future = future
+        self._user_ns = user_ns
+        self._box = box  # escort fills task_id after submission
+
+    @property
+    def task_id(self) -> str | None:
+        return self._box.get("task_id")
+
+    def done(self) -> bool:
+        return self._future.done()
+
+    def result(self, timeout: float | None = None) -> dict:
+        values = self._future.result(timeout)
+        self._user_ns.update(values)
+        return values
+
+    def __await__(self):
+        async def _get():
+            values = await asyncio.wrap_future(self._future)
+            self._user_ns.update(values)
+            return values
+        return _get().__await__()
+
+    def __repr__(self) -> str:
+        if not self._future.done():
+            state = "running"
+        elif self._future.exception() is not None:
+            state = f"failed: {self._future.exception()}"
+        else:
+            state = "done"
+        return f"<krauncher async task {self.task_id or '?'} — {state}>"
+
 
 def _session_group_id(min_vram_gb: int, gpu_name: str | None = None) -> str:
     """Affinity key for a cell: session + requirement class.
@@ -173,6 +231,10 @@ class KrauncherMagics(Magics):
     @magic_arguments.argument("--dataset-size", dest="dataset_size", type=float, default=None,
                               help="declared input data size in MB for the quote "
                                    "(e.g. private S3 objects the client cannot size)")
+    @magic_arguments.argument("--async", dest="async_name", nargs="?", const="kr_task",
+                              default=None, metavar="NAME",
+                              help="non-blocking: submit and return immediately; a handle "
+                                   "is injected as NAME (default kr_task) for later cells")
     @magic_arguments.argument("--estimate", action="store_true",
                               help="classify and quote only — do not run")
     @cell_magic
@@ -241,7 +303,7 @@ class KrauncherMagics(Magics):
         # --estimate stops after the analysis phase — no estimate_only stubs.
         client = KrauncherClient()
 
-        async def _submit():
+        async def _phase1():
             # Size the pre-fetch first: it feeds cu_io / disk in the quote.
             # Explicit --dataset-size wins (private S3 objects cannot be
             # sized client-side); otherwise the HF Hub API sizes hf refs.
@@ -254,7 +316,7 @@ class KrauncherMagics(Magics):
                 print("krauncher: hf pre-fetch: "
                       + ", ".join(u.removeprefix("hf://") for u in hf_urls)
                       + size_str)
-            # Phase 1 — analysis request: quote before anything is submitted.
+            # Analysis request: quote before anything is submitted.
             quote = await client.estimate_code(
                 cell,
                 inputs=call_values,
@@ -263,13 +325,12 @@ class KrauncherMagics(Magics):
                 vram_gb=args.vram,
                 dataset_size=dataset_mb,
             )
-            self._print_quote(quote)
-            if args.estimate:
-                return None
-            # Phase 2 — execution request: precomputed classification (no
-            # re-analysis) + session affinity keyed by the requirement class.
-            handle = await client.run_code(
-                cell,
+            return dataset_mb, quote
+
+        def _run_kwargs(quote, dataset_mb, stream):
+            # Phase 2 kwargs — precomputed classification (no re-analysis)
+            # + session affinity keyed by the requirement class.
+            return dict(
                 inputs=call_values,
                 outputs=outputs,
                 # Auto-detected outputs may be unset or non-JSON-safe — drop
@@ -282,9 +343,55 @@ class KrauncherMagics(Magics):
                 timeout=args.timeout,
                 data_urls=data_urls,
                 dataset_size=dataset_mb,
-                # Live feedback: wait() mirrors remote stdout/stderr into the
-                # cell output as it streams from the relay.
-                stream_stderr=True,
+                stream_stderr=stream,
+            )
+
+        if args.async_name:
+            # Non-blocking: quote synchronously, then hand the submission and
+            # the whole escort (payload delivery + wait + decode) to the
+            # background loop. No console mirroring — the cell is long gone.
+            try:
+                dataset_mb, quote = _run_sync(_phase1())
+            except KrauncherError as exc:
+                print(f"krauncher: {exc}")
+                return
+            self._print_quote(quote)
+            if args.estimate:
+                return
+            box: dict = {}
+
+            async def _escort():
+                handle = await client.run_code(
+                    cell, **_run_kwargs(quote, dataset_mb, stream=False),
+                )
+                box["task_id"] = handle.task_id
+                result = await handle.wait(timeout=args.timeout + 600)
+                if result.status != "completed":
+                    raise KrauncherError(
+                        f"task {result.status}"
+                        + (f"\n{result.traceback}" if result.traceback else "")
+                    )
+                returned = outputs
+                if auto_out and isinstance(result.output, dict):
+                    returned = [n for n in outputs if n in result.output]
+                return decode_outputs(result.output, returned)
+
+            future = asyncio.run_coroutine_threadsafe(_escort(), _escort_loop())
+            task = AsyncTask(future, self.shell.user_ns, box)
+            self.shell.user_ns[args.async_name] = task
+            print(f"krauncher: async task → {args.async_name}  "
+                  f"(poll .done(), values via .result() or `await {args.async_name}`)")
+            return
+
+        async def _submit():
+            dataset_mb, quote = await _phase1()
+            self._print_quote(quote)
+            if args.estimate:
+                return None
+            # Live feedback: wait() mirrors remote stdout/stderr and the GPU
+            # metric progress line into the cell output.
+            handle = await client.run_code(
+                cell, **_run_kwargs(quote, dataset_mb, stream=True),
             )
             return await handle
 

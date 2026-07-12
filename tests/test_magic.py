@@ -136,3 +136,53 @@ def test_session_group_id_gpu_pin_in_key():
     pinned = _session_group_id(24, "RTX 4090")
     assert plain != pinned
     assert pinned.endswith("-rtx4090")
+
+
+# ---------------------------------------------------------------------------
+# --async escort (AsyncTask + background loop)
+# ---------------------------------------------------------------------------
+
+import asyncio as _asyncio
+
+from krauncher_magic.magic import AsyncTask, _escort_loop
+
+
+def test_escort_loop_singleton_and_alive():
+    loop1 = _escort_loop()
+    loop2 = _escort_loop()
+    assert loop1 is loop2 and loop1.is_running()
+
+
+def test_async_task_result_injects_values():
+    ns = {}
+    async def work():
+        return {"a": 1, "b": 2}
+    fut = _asyncio.run_coroutine_threadsafe(work(), _escort_loop())
+    task = AsyncTask(fut, ns, {"task_id": "t-1"})
+    assert task.result(timeout=5) == {"a": 1, "b": 2}
+    assert ns == {"a": 1, "b": 2}
+    assert task.done() and task.task_id == "t-1"
+
+
+def test_async_task_failure_raises():
+    async def boom():
+        raise RuntimeError("remote failed")
+    fut = _asyncio.run_coroutine_threadsafe(boom(), _escort_loop())
+    task = AsyncTask(fut, {}, {})
+    with pytest.raises(RuntimeError, match="remote failed"):
+        task.result(timeout=5)
+    assert "failed" in repr(task)
+
+
+async def _await_it(task):
+    return await task
+
+
+def test_async_task_awaitable():
+    ns = {}
+    async def work():
+        return {"x": 9}
+    fut = _asyncio.run_coroutine_threadsafe(work(), _escort_loop())
+    task = AsyncTask(fut, ns, {})
+    values = _asyncio.run(_await_it(task))
+    assert values == {"x": 9} and ns == {"x": 9}
