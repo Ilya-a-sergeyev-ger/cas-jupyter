@@ -1,14 +1,33 @@
 [project]
 name = "krauncher-jupyter"
 version = "0.1.0"
-description = "Krauncher %%krauncher cell magic — run notebook cells on the cheapest remote GPU"
+description = "%%krauncher cell magic — run notebook cells on the cheapest suitable remote GPU, per-task billing"
 readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ilya Sergeev" }]
+keywords = ["jupyter", "ipython", "gpu", "cloud", "machine-learning", "cell-magic", "colab"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Jupyter",
+    "Framework :: IPython",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
 requires-python = ">=3.11"
 dependencies = [
     "ipython>=8.0",
-    # krauncher (cas-client) must be importable; installed separately —
-    # it is not on PyPI yet: pip install -e ../cas-client
+    "krauncher>=0.1.0",
 ]
+
+[project.urls]
+Homepage = "https://krauncher.com"
+Repository = "https://github.com/Ilya-a-sergeyev-ger/cas-jupyter"
 
 [project.optional-dependencies]
 dev = [
@@ -22,6 +41,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["krauncher_magic"]
+
+[tool.hatch.build.targets.sdist]
+# Public artifact: the extension only.
+include = [
+    "krauncher_magic",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100
