@@ -50,3 +50,64 @@ def test_interrupt_cancels_coroutine():
     with pytest.raises(KeyboardInterrupt):
         _run_sync(coro())
     assert state.get("cancelled") is True
+
+
+# ---------------------------------------------------------------------------
+# auto namespace guards (_auto_inputs)
+# ---------------------------------------------------------------------------
+
+from krauncher_magic.magic import _auto_inputs
+
+
+def test_auto_inputs_plain_values_pass():
+    names, notes = _auto_inputs(["epochs", "cfg"], {"epochs": 3, "cfg": {"lr": 0.1}})
+    assert names == ["epochs", "cfg"]
+    assert notes == []
+
+
+def test_auto_inputs_undefined_skipped_silently():
+    names, notes = _auto_inputs(["nope"], {})
+    assert names == [] and notes == []
+
+
+def test_auto_inputs_module_noted():
+    import json as mod
+    names, notes = _auto_inputs(["mod"], {"mod": mod})
+    assert names == []
+    assert any("import it inside the cell" in n for n in notes)
+
+
+def test_auto_inputs_callable_not_transferable():
+    names, notes = _auto_inputs(["fn"], {"fn": lambda: 1})
+    assert names == []
+    assert any("non-transferable" in n for n in notes)
+
+
+def test_auto_inputs_secret_name_held_back():
+    names, notes = _auto_inputs(["api_key"], {"api_key": "abc"})
+    assert names == []
+    assert any("credential" in n and "--in api_key" in n for n in notes)
+
+
+def test_auto_inputs_secret_value_held_back():
+    names, notes = _auto_inputs(["s"], {"s": "sk-abcdefghijkl"})
+    assert names == []
+    assert any("credential" in n for n in notes)
+
+
+def test_auto_inputs_size_guard():
+    big = "x" * (2 * 1024 * 1024)
+    names, notes = _auto_inputs(["blob"], {"blob": big})
+    assert names == []
+    assert any("1 MB auto limit" in n and "--in blob" in n for n in notes)
+
+
+def test_auto_inputs_non_json_safe_noted():
+    names, notes = _auto_inputs(["obj"], {"obj": object()})
+    assert names == []
+    assert any("non-transferable" in n for n in notes)
+
+
+def test_auto_inputs_author_is_not_a_secret():
+    names, notes = _auto_inputs(["author"], {"author": "ilya"})
+    assert names == ["author"] and notes == []

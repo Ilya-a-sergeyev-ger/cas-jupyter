@@ -5,11 +5,71 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
+import re
 import threading
 from typing import Any
 
 from IPython.core import magic_arguments
 from IPython.core.magic import Magics, cell_magic, magics_class
+
+# Auto-transfer guards: values above the size limit and credential-shaped
+# values are not sent automatically — an explicit --in overrides both.
+_AUTO_INPUT_LIMIT_BYTES = 1024 * 1024
+_SECRET_NAME_RE = re.compile(
+    r"(?i)(^|_)(secrets?|tokens?|passwords?|passwd|pwd|api_?keys?"
+    r"|credentials?|private_key|access_key|auth)(_|$)"
+)
+_SECRET_VALUE_RE = re.compile(
+    r"^(sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|gho_[A-Za-z0-9]{8,}"
+    r"|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.)"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY"
+)
+
+
+def _auto_inputs(free: list[str], user_ns: dict) -> tuple[list[str], list[str]]:
+    """Filter free-name candidates against the notebook namespace.
+
+    Returns ``(names, notes)`` — names to send and human-readable notes about
+    candidates that were held back (and how to send them anyway).
+    """
+    names: list[str] = []
+    notes: list[str] = []
+    unsafe: list[str] = []
+    for n in free:
+        if n not in user_ns:
+            continue  # genuinely undefined — the remote NameError says it best
+        v = user_ns[n]
+        if inspect.ismodule(v):
+            notes.append(f"{n}: module — import it inside the cell")
+            continue
+        if callable(v):
+            unsafe.append(n)  # notebook-defined function/class: not transferable
+            continue
+        if _SECRET_NAME_RE.search(n) or (
+            isinstance(v, str) and _SECRET_VALUE_RE.match(v)
+        ):
+            notes.append(f"{n}: looks like a credential — not sent (pass --in {n} to send)")
+            continue
+        try:
+            size = len(json.dumps(v).encode("utf-8"))
+        except (TypeError, ValueError):
+            unsafe.append(n)
+            continue
+        if size > _AUTO_INPUT_LIMIT_BYTES:
+            notes.append(
+                f"{n}: {size / (1024 * 1024):.1f} MB — over the 1 MB auto limit "
+                f"(pass --in {n} to send)"
+            )
+            continue
+        names.append(n)
+    if unsafe:
+        notes.append(
+            "not auto-sent (non-transferable): " + ", ".join(unsafe)
+            + " — recreate inside the cell or use a volume / data source"
+        )
+    return names, notes
 
 
 def _run_sync(coro) -> Any:
@@ -78,9 +138,11 @@ class KrauncherMagics(Magics):
 
     @magic_arguments.magic_arguments()
     @magic_arguments.argument("--in", dest="inputs", action="append", metavar="NAMES",
-                              help="comma-separated notebook variables sent to the task")
+                              help="comma-separated notebook variables sent to the task "
+                                   "(default: auto-detect from the cell's free variables)")
     @magic_arguments.argument("--out", dest="outputs", action="append", metavar="NAMES",
-                              help="comma-separated variables returned into the notebook")
+                              help="comma-separated variables returned into the notebook "
+                                   "(default: auto-detect from the cell's assignments)")
     @magic_arguments.argument("--pip", action="append", metavar="PKGS",
                               help="comma-separated pip packages for the sandbox")
     @magic_arguments.argument("--vram", type=int, default=None,
@@ -94,14 +156,34 @@ class KrauncherMagics(Magics):
     @cell_magic
     def krauncher(self, line: str, cell: str) -> None:
         args = magic_arguments.parse_argstring(self.krauncher, line)
-        inputs = _split_names(args.inputs)
-        outputs = _split_names(args.outputs)
         pip = _split_names(args.pip)
 
-        missing = [n for n in inputs if n not in self.shell.user_ns]
-        if missing:
-            print(f"krauncher: --in {', '.join(missing)}: not defined in the notebook")
-            return
+        # --in / --out are exact overrides; when omitted, detect the transfer
+        # set from the cell's AST (free variables in, assigned names out).
+        auto_in = args.inputs is None
+        auto_out = args.outputs is None
+        if auto_in or auto_out:
+            from krauncher.codeblock import analyze_names
+            try:
+                free, assigned = analyze_names(cell)
+            except Exception:
+                free, assigned = [], []  # submission reports the syntax error
+
+        if auto_in:
+            inputs, notes = _auto_inputs(free, self.shell.user_ns)
+            for note in notes:
+                print(f"krauncher: {note}")
+        else:
+            inputs = _split_names(args.inputs)
+            missing = [n for n in inputs if n not in self.shell.user_ns]
+            if missing:
+                print(f"krauncher: --in {', '.join(missing)}: not defined in the notebook")
+                return
+        outputs = assigned if auto_out else _split_names(args.outputs)
+        if auto_in or auto_out:
+            print(f"krauncher: auto --in {','.join(inputs) or '(none)'} "
+                  f"--out {','.join(outputs) or '(none)'}")
+
         call_values = {n: self.shell.user_ns[n] for n in inputs}
 
         # Fresh client per cell: each execution runs on its own private event
@@ -117,6 +199,9 @@ class KrauncherMagics(Magics):
                 cell,
                 inputs=call_values,
                 outputs=outputs,
+                # Auto-detected outputs may be unset or non-JSON-safe — drop
+                # them remotely instead of failing the task.
+                lenient_outputs=auto_out,
                 vram_gb=args.vram,
                 gpu_name=args.gpu_name,
                 pip=pip or None,
@@ -146,8 +231,15 @@ class KrauncherMagics(Magics):
                   + (f"\n{result.traceback}" if result.traceback else ""))
             return
 
+        returned = outputs
+        if auto_out and isinstance(result.output, dict):
+            returned = [n for n in outputs if n in result.output]
+            dropped = [n for n in outputs if n not in result.output]
+            if dropped:
+                print("krauncher: not returned (non-JSON-safe or unset): "
+                      + ", ".join(dropped))
         try:
-            values = decode_outputs(result.output, outputs)
+            values = decode_outputs(result.output, returned)
         except KrauncherError as exc:
             print(f"krauncher: {exc}")
             return
@@ -157,7 +249,7 @@ class KrauncherMagics(Magics):
                 if result.total_charged_ku else "n/a")
         print(f"krauncher: done on {result.actual_gpu} in "
               f"{result.execution_time_sec:.1f}s — {cost}"
-              + (f" → {', '.join(outputs)}" if outputs else ""))
+              + (f" → {', '.join(returned)}" if returned else ""))
 
     @staticmethod
     def _print_quote(c: Any) -> None:
