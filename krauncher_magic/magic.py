@@ -205,6 +205,16 @@ class KrauncherMagics(Magics):
 
         call_values = {n: self.shell.user_ns[n] for n in inputs}
 
+        # HF references: translate literal load_dataset/from_pretrained calls
+        # into pre-fetched data-bridge downloads (hub-cache layout) — the IO
+        # runs before the container starts and lands in the download phase.
+        from krauncher.hf import CACHE_FRAGMENT, detect_hf_refs
+        hf_urls, hf_dynamic = detect_hf_refs(cell)
+        for d in hf_dynamic:
+            print(f"krauncher: {d}: dynamic HF reference — downloads in-code, "
+                  f"IO will be billed as compute")
+        data_urls = [u + CACHE_FRAGMENT for u in hf_urls] or None
+
         # Fresh client per cell: each execution runs on its own private event
         # loop (see _run_sync), and the cell code changes between runs anyway,
         # so there is no cross-cell client state worth keeping.
@@ -215,6 +225,15 @@ class KrauncherMagics(Magics):
         client = KrauncherClient()
 
         async def _submit():
+            # Size the HF pre-fetch first: it feeds cu_io / disk in the quote.
+            dataset_mb = None
+            if hf_urls:
+                from krauncher.hf import hf_size_mb
+                dataset_mb = await hf_size_mb(hf_urls)
+                size_str = f" ({dataset_mb:.0f} MB)" if dataset_mb else ""
+                print("krauncher: hf pre-fetch: "
+                      + ", ".join(u.removeprefix("hf://") for u in hf_urls)
+                      + size_str)
             # Phase 1 — analysis request: quote before anything is submitted.
             quote = await client.estimate_code(
                 cell,
@@ -222,6 +241,7 @@ class KrauncherMagics(Magics):
                 outputs=outputs,
                 lenient_outputs=auto_out,
                 vram_gb=args.vram,
+                dataset_size=dataset_mb,
             )
             self._print_quote(quote)
             if args.estimate:
@@ -240,6 +260,8 @@ class KrauncherMagics(Magics):
                 gpu_name=args.gpu_name,
                 pip=pip or None,
                 timeout=args.timeout,
+                data_urls=data_urls,
+                dataset_size=dataset_mb,
                 # Live feedback: wait() mirrors remote stdout/stderr into the
                 # cell output as it streams from the relay.
                 stream_stderr=True,
