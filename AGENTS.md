@@ -39,10 +39,13 @@ monorepo `doc/`.
 
 ## Phase discipline
 
-Current state: Phase 0 (explicit `--in`/`--out`) is implemented. Do not build
-ahead of the roadmap (monorepo `doc/jupyter_roadmap.md`) without being asked —
-no cloudpickle, no auto namespace detection, no streaming, unless the task
-explicitly targets Phase 1+.
+Current state: implemented and documented in the README — auto namespace
+detection (free vars → inputs, assigned → outputs, with `--in`/`--out`
+overrides), quote-before-run, live streaming, HuggingFace/S3 pre-fetch, and
+`--async` non-blocking cells. Do not build ahead of the roadmap (monorepo
+`doc/jupyter_roadmap.md`) without being asked — in particular no cloudpickle
+(transferred values stay JSON-safe only, hard invariant 3) and nothing beyond
+the feature set above unless the task explicitly targets the next phase.
 
 ## Engineering conventions
 

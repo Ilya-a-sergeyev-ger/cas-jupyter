@@ -58,8 +58,8 @@ settings keeps it around longer.
   they happen, plus a GPU utilisation/VRAM/elapsed progress line.
 - **Hugging Face / S3 pre-fetch** — literal `load_dataset("org/name")`,
   `from_pretrained("org/name")` and `"s3://bucket/key"` references are
-  downloaded by the data bridge *before* the container starts (the IO is
-  metered as download, not compute) and served to your unmodified code.
+  downloaded by the data bridge *before* the container starts and served to
+  your unmodified code.
   Credentials come from your account defaults (Storage → Credentials).
 - **Non-blocking cells** — `--async` submits and returns a handle for later
   cells (`await kr_task` / `kr_task.result()`).
@@ -97,8 +97,8 @@ in a `.env` next to the notebook — same as the SDK. Get a key at
   data sources / volumes / the HF-S3 pre-fetch above.
 - No GPU state across cells (see "Why per-cell").
 - Dynamic Hub/S3 references (f-strings, variables) cannot be pre-fetched —
-  they download inside execution and are billed as compute (a warning says
-  so).
+  they download inside execution instead of the pre-fetch phase (a warning
+  says so).
 - Top-level `global` in a cell is not supported (the body runs as a
   function).
 
