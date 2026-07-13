@@ -1,6 +1,6 @@
 [project]
 name = "krauncher-jupyter"
-version = "0.1.2"
+version = "0.1.3"
 description = "%%krauncher cell magic — run notebook cells on the cheapest suitable remote GPU, per-task billing"
 readme = "README.md"
 license = { text = "MIT" }

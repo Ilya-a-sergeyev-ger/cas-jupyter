@@ -393,7 +393,10 @@ class KrauncherMagics(Magics):
             handle = await client.run_code(
                 cell, **_run_kwargs(quote, dataset_mb, stream=True),
             )
-            return await handle
+            # Client-side wait must outlast the remote execution timeout, or a
+            # long task is abandoned before it finishes (the --async path does
+            # the same). --timeout governs both remote kill and client wait.
+            return await handle.wait(timeout=args.timeout + 600)
 
         try:
             result = _run_sync(_submit())
