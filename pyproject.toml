@@ -1,6 +1,6 @@
 [project]
 name = "krauncher-jupyter"
-version = "0.1.0"
+version = "0.1.1"
 description = "%%krauncher cell magic — run notebook cells on the cheapest suitable remote GPU, per-task billing"
 readme = "README.md"
 license = { text = "MIT" }
@@ -21,7 +21,7 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "ipython>=8.0",
+    "ipython>=7.0",
     "krauncher>=0.1.0",
 ]
 
