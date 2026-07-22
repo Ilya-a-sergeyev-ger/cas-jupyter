@@ -20,7 +20,7 @@ not (cloudpickle is Phase 1). Credentials: CAS_API_KEY / CAS_BROKER_URL env
 vars or .env, same as the krauncher SDK.
 """
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 
 
 def load_ipython_extension(ipython):
