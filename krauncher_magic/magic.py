@@ -426,7 +426,8 @@ class KrauncherMagics(Magics):
             return
         self.shell.user_ns.update(values)
 
-        cost = (f"{result.total_charged_ku:.2f} KU"
+        # Pre-commercial phase: units drawn from the free test allowance, not a charge.
+        cost = (f"{result.total_charged_ku:.2f} units"
                 if result.total_charged_ku else "n/a")
         print(f"krauncher: done on {result.actual_gpu} in "
               f"{result.execution_time_sec:.1f}s — {cost}"
