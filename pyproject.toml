@@ -1,7 +1,7 @@
 [project]
 name = "krauncher-jupyter"
 version = "0.2.4"
-description = "%%krauncher cell magic — run notebook cells on the cheapest suitable remote GPU, priced before the cell runs"
+description = "%%krauncher cell magic — run notebook cells on the cheapest suitable remote GPU, per-task billing"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ilya Sergeev" }]
